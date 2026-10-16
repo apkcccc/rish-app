@@ -4,4 +4,9 @@ extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autoli
 rootProject.name = 'tech.zseven.rish'
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')
-include ':guestprobe'
+// Lyra Code build note: ':guestprobe' throws during configuration unless a guest
+// runtime has already been staged (android/rish-ffi/rish_ffi.version), which made
+// a runtime-free lite build impossible to configure. Include it only when the
+// staged runtime is actually present; a guest build stages it first, so the
+// probe keeps working there unchanged.
+if (new File(rootDir, 'rish-ffi/rish_ffi.version').isFile()) { include ':guestprobe' }
