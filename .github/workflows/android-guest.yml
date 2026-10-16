@@ -1,0 +1,106 @@
+name: Android guest APK
+
+# 构建带 guest 运行时的 rish-app：先 stage 纯 Rust 的 rish 运行时（librish_ffi.so），
+# 再由 Gradle 编译 JNI shim 并把内核/initramfs 引导资产打进 APK。
+# agent core 与 libgit2 是可选开关，默认关闭，便于先验证最小链路。
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: Target ABI (must match the staged runtime ABI)
+        type: choice
+        default: arm64-v8a
+        options:
+          - arm64-v8a
+      stage_agent_core:
+        description: Also stage the shared Rust agent core
+        type: boolean
+        default: false
+      stage_libgit2:
+        description: Also stage libgit2 (project context)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  guest:
+    name: Guest-enabled standalone debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      ABI: ${{ inputs.abi }}
+      RISH_ANDROID_ABIS: ${{ inputs.abi }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.11.0
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh jq libdigest-sha-perl
+
+      - name: Install Rust 1.94 and the Android target
+        run: |
+          rustup toolchain install 1.94 --profile minimal
+          rustup target add --toolchain 1.94 aarch64-linux-android
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          SDKM="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          # 平台包带小版本号（无 bare android-37）；cmake;3.22.1 与
+          # ndk;27.1.12297006 均已核实存在于 SDK 仓库且为 stable。
+          "$SDKM" "platforms;android-37.0" "platforms;android-37.1" "platforms;android-37.2" \
+                  "build-tools;37.0.0" "cmake;3.22.1" "ndk;27.1.12297006"
+          # prepare-rish-android.sh 会从 $ANDROID_HOME/ndk/27.1.12297006 自动解析 NDK。
+
+      - name: Stage pinned rish Android runtime
+        run: ./scripts/prepare-rish-android.sh
+
+      - name: Stage shared Rust agent core
+        if: ${{ inputs.stage_agent_core }}
+        run: ./scripts/prepare-rish-agent-core-android.sh
+
+      - name: Stage libgit2
+        if: ${{ inputs.stage_libgit2 }}
+        run: ./scripts/prepare-libgit2-android.sh
+
+      - name: Preflight and install dependencies
+        run: |
+          node scripts/verify-source-checkout.mjs
+          npm ci --prefix apps/mobile
+
+      - name: Assemble guest standalone debug APK
+        working-directory: apps/mobile/android
+        run: |
+          ./gradlew :app:assembleDebug \
+            -PrishStandalone=true \
+            -PreactNativeArchitectures="$ABI" \
+            --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rish-app-guest-debug-${{ inputs.abi }}
+          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
