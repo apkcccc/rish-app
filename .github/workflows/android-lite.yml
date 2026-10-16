@@ -1,0 +1,81 @@
+name: Android lite APK
+
+# 构建 rish-app 的 lite 版：不 stage rish-ffi / agent core / libgit2，
+# 因此完全跳过 CMake 与 NDK，只编 Kotlin/Java + React Native 预编译 AAR。
+# 产物是 standalone debug APK（JS 已打包，不需要 Metro）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: Target ABI
+        type: choice
+        default: arm64-v8a
+        options:
+          - arm64-v8a
+          - x86_64
+
+permissions:
+  contents: read
+
+jobs:
+  lite:
+    name: Lite standalone debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ABI: ${{ inputs.abi }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.11.0
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          SDKM="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+          # 没有 bare 的 platforms;android-37：compileSdk 37 对应带小版本号的
+          # android-37.0 / 37.1 / 37.2（已核实存在于 SDK 仓库，channel-0 stable）。
+          # 三个都装，AGP 需要哪个都能解析。
+          PKGS="platforms;android-37.0 platforms;android-37.1 platforms;android-37.2 build-tools;37.0.0"
+          if ! "$SDKM" $PKGS; then
+            echo "::warning::部分 SDK 包安装失败，以下为当前可用候选："
+            "$SDKM" --list | grep -E 'platforms;android-3[6-9]|build-tools;3[6-9]' || true
+            exit 1
+          fi
+
+      - name: Preflight and install dependencies
+        run: |
+          node scripts/verify-source-checkout.mjs
+          npm ci --prefix apps/mobile
+
+      - name: Assemble lite standalone debug APK
+        working-directory: apps/mobile/android
+        run: |
+          ./gradlew :app:assembleDebug \
+            -PrishStandalone=true \
+            -PreactNativeArchitectures="$ABI" \
+            --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rish-app-lite-debug-${{ inputs.abi }}
+          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
